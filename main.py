@@ -267,7 +267,8 @@ def reset_game_state(difficulty, high_score):
         'ice_timer': 0.0,
         'shake_timer': 0,
         'flash_timer': 0,
-        'flash_color': (0, 0, 0)
+        'flash_color': (0, 0, 0),
+        'skill_cooldown': 0
     }
 
 # ==========================================
@@ -303,7 +304,7 @@ def main():
     # 初始化這些變數，稍後 reset 時會覆蓋
     score, lives, balls, effects, particles, combo, ambient_sparks = 0, MAX_LIVES, [], [], [], 0, []
     last_spawn_time, current_speed, current_spawn_interval, ice_timer = 0, 0, 0, 0.0
-    shake_timer, flash_timer, flash_color = 0, 0, (0, 0, 0)
+    shake_timer, flash_timer, flash_color, skill_cooldown = 0, 0, (0, 0, 0), 0
     backSub = None 
 
     print("Game Started! Press 'q' to quit.")
@@ -423,6 +424,7 @@ def main():
                 shake_timer = state['shake_timer']
                 flash_timer = state['flash_timer']
                 flash_color = state['flash_color']
+                skill_cooldown = state['skill_cooldown']
                 
                 # 重新初始化背景相減器以適應新的解析度
                 backSub = cv2.createBackgroundSubtractorMOG2(history=100, varThreshold=50, detectShadows=False)
@@ -431,6 +433,9 @@ def main():
                 break
 
         elif game_state == STATE_PLAYING:
+            if skill_cooldown > 0:
+                skill_cooldown -= 1
+
             # 2. 電腦視覺追蹤運算 (MediaPipe 或是 背景相減 Outlines)
             player_points = [] # 用於 MediaPipe 精準圓形碰撞 (x, y, radius)
             player_boxes = []  # 用於背景相減 AABB 碰撞偵測 (x, y, w, h)
@@ -529,6 +534,30 @@ def main():
                         player_points.append((rax, ray, 35))
                         cv2.circle(frame, (rax, ray), 35, (255, 255, 0), 2, cv2.LINE_AA)
                         cv2.circle(frame, (rax, ray), 30, (150, 150, 0), -1)
+
+                        # 7. 手勢技能偵測：雙手手腕交叉 (發動全螢幕衝擊波)
+                        if skill_cooldown <= 0:
+                            wrist_dist = np.hypot(lwx - rwx, lwy - rwy)
+                            if wrist_dist < 60:
+                                # 觸發清場大絕招
+                                balls.clear()
+                                flash_timer = 15
+                                flash_color = (255, 255, 255)
+                                shake_timer = 20
+                                score += 50
+                                effects.append({'text': f'P{idx+1} ULTIMATE WAVES!', 'x': bx - 100, 'y': by, 'color': (0, 255, 255), 'life': 60})
+                                skill_cooldown = 300  # 冷卻約 10 秒 (假設 30 FPS)
+                                if sounds['hit_bomb']: sounds['hit_bomb'].play()
+                                # 產生大範圍放射粒子特效
+                                for _ in range(40):
+                                    angle = random.uniform(0, 2 * math.pi)
+                                    speed_pt = random.uniform(5, 20)
+                                    particles.append({
+                                        'x': float(bx), 'y': float(by),
+                                        'vx': speed_pt * math.cos(angle), 'vy': speed_pt * math.sin(angle),
+                                        'color': (0, 255, 255), 'radius': random.randint(3, 8),
+                                        'life': 1.0, 'decay': random.uniform(0.01, 0.04)
+                                    })
             else:
                 # 傳統 MOG2 背景相減法 + 霓虹邊框繪製
                 fgMask = backSub.apply(frame)
@@ -837,8 +866,6 @@ def main():
                     cv2.rectangle(frame, (0, 0), (FRAME_W, FRAME_H), flash_color, border_thick)
                 flash_timer -= 1
 
-            # 磨砂玻璃左上 HUD 面板 (Score & High Score)
-            frame = draw_glass_panel(frame, 15, 15, 210, 95, (30, 20, 20), 0.5, (0, 215, 255), 1)
             # 磨砂玻璃左上 HUD 面板 (Score, High Score & Skill)
             frame = draw_glass_panel(frame, 15, 15, 280, 125, (30, 20, 20), 0.5, (0, 215, 255), 1)
             draw_text(frame, f"Score: {score}", (30, 48), 0.7, (255, 255, 255), 2)
