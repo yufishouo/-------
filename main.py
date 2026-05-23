@@ -68,24 +68,61 @@ for bt in ball_types:
 BALL_HEIGHT, BALL_WIDTH = ball_imgs['normal'].shape[:2]
 
 # ==========================================
+# 載入場景背景圖
+# ==========================================
+background_img = cv2.imread('football.jpg')
+if background_img is None:
+    print("Warning: 無法讀取 'football.jpg'。請確認檔案是否存在於同一目錄下。")
+
+# ==========================================
 # 電腦視覺 MediaPipe 可選模式設定與偵測
 # ==========================================
 USE_MEDIAPIPE = False
-mp_hands = None
-mp_pose = None
-hands_tracker = None
 pose_tracker = None
+mp_image_format = None
 
 try:
     import mediapipe as mp
-    mp_hands = mp.solutions.hands
-    mp_pose = mp.solutions.pose
-    hands_tracker = mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.5, min_tracking_confidence=0.5)
-    pose_tracker = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
+    from mediapipe.tasks import python
+    from mediapipe.tasks.python import vision
+    
+    mp_image_format = mp.ImageFormat.SRGB
+    base_options = python.BaseOptions(model_asset_path='pose_landmarker.task')
+    options = vision.PoseLandmarkerOptions(
+        base_options=base_options,
+        running_mode=vision.RunningMode.VIDEO,
+        num_poses=2,  # 啟用雙人追蹤模式
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
+        min_tracking_confidence=0.5,
+        output_segmentation_masks=True  # 新增：啟用背景去背遮罩
+    )
+    pose_tracker = vision.PoseLandmarker.create_from_options(options)
     USE_MEDIAPIPE = True
-    print(">>> [MediaPipe] 成功載入 MediaPipe！已自動啟用雙手與骨架關節追蹤模式。")
+    print(">>> [MediaPipe] 成功載入 Tasks API！已自動啟用雙人骨架追蹤與虛擬化身模式。")
 except Exception as e:
-    print(">>> [MediaPipe] 未偵測到 MediaPipe 套件。遊戲將自動降級並採用背景相減(MOG2)動態偵測模式。")
+    print(f">>> [MediaPipe] 初始化失敗 ({e})。請確認已下載 'pose_landmarker.task' 模型檔案。遊戲將降級為 MOG2 動態偵測模式。")
+
+def update_pose_tracker(num_poses):
+    global pose_tracker
+    if not USE_MEDIAPIPE:
+        return
+    try:
+        options = vision.PoseLandmarkerOptions(
+            base_options=base_options,
+            running_mode=vision.RunningMode.VIDEO,
+            num_poses=num_poses,
+            min_pose_detection_confidence=0.5,
+            min_pose_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+            output_segmentation_masks=True
+        )
+        if pose_tracker:
+            pose_tracker.close() # 關閉並釋放原本的資源
+        pose_tracker = vision.PoseLandmarker.create_from_options(options)
+        print(f">>> [MediaPipe] 追蹤人數已更新為: {num_poses} 人")
+    except Exception as e:
+        print(f"Error updating MediaPipe tracker: {e}")
 
 # ==========================================
 # 高分紀錄儲存與讀取 (Leaderboard)
@@ -251,6 +288,7 @@ def draw_text(img, text, pos, scale, color, thickness=2, center=False):
 # ==========================================
 def main():
     cap = cv2.VideoCapture(0)
+    mp_start_time = time.time()
     if not cap.isOpened():
         print("Error: Could not open webcam.")
         return
@@ -331,12 +369,15 @@ def main():
             key = cv2.waitKey(30) & 0xFF
             if key == ord('1'):
                 game_mode = 1
+                update_pose_tracker(1)
                 game_state = STATE_MENU_DIFF
             elif key == ord('2'):
                 game_mode = 2
+                update_pose_tracker(2)
                 game_state = STATE_MENU_DIFF
             elif key == ord('3'):
                 game_mode = 3
+                update_pose_tracker(1)
                 game_state = STATE_MENU_DIFF
             elif key == ord('q'):
                 break
@@ -397,61 +438,111 @@ def main():
             
             if USE_MEDIAPIPE:
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_image = mp.Image(image_format=mp_image_format, data=rgb_frame)
+                timestamp_ms = int((time.time() - mp_start_time) * 1000)
                 
-                # 處理雙手
-                hand_results = hands_tracker.process(rgb_frame)
-                if hand_results and hand_results.multi_hand_landmarks:
-                    for hand_lms in hand_results.multi_hand_landmarks:
-                        # 繪製霓虹發光雙手連線
-                        for connection in mp_hands.HAND_CONNECTIONS:
-                            start_idx, end_idx = connection
-                            p1 = hand_lms.landmark[start_idx]
-                            p2 = hand_lms.landmark[end_idx]
-                            c1 = (int(p1.x * FRAME_W), int(p1.y * FRAME_H))
-                            c2 = (int(p2.x * FRAME_W), int(p2.y * FRAME_H))
-                            cv2.line(frame, c1, c2, (0, 215, 255), 4, cv2.LINE_AA) # 金色霓虹
-                            cv2.line(frame, c1, c2, (255, 255, 255), 1, cv2.LINE_AA) # 白色核心
-                        
-                        # 收集手部關節作為碰撞檢測點
-                        for lm in hand_lms.landmark:
-                            lx, ly = int(lm.x * FRAME_W), int(lm.y * FRAME_H)
-                            player_points.append((lx, ly, 18)) # 18px 碰撞半徑
-                            cv2.circle(frame, (lx, ly), 5, (0, 255, 255), -1, cv2.LINE_AA)
-                            
-                # 處理身體骨架 (頭部、肩膀)
-                pose_results = pose_tracker.process(rgb_frame)
+                # 執行多骨架推論
+                pose_results = pose_tracker.detect_for_video(mp_image, timestamp_ms)
+                
+                # --- 背景替換 (MediaPipe 虛擬攝影棚) ---
+                if background_img is not None and pose_results and pose_results.segmentation_masks:
+                    bg_resized = cv2.resize(background_img, (FRAME_W, FRAME_H))
+                    combined_mask = np.zeros((FRAME_H, FRAME_W), dtype=np.float32)
+                    for mask in pose_results.segmentation_masks:
+                        mask_arr = mask.numpy_view()
+                        if mask_arr.shape != (FRAME_H, FRAME_W):
+                            mask_arr = cv2.resize(mask_arr, (FRAME_W, FRAME_H))
+                        combined_mask = np.maximum(combined_mask, mask_arr)
+                    
+                    # 邊緣平滑化
+                    combined_mask = cv2.GaussianBlur(combined_mask, (5, 5), 0)
+                    combined_mask_3c = np.expand_dims(combined_mask, axis=-1)
+                    
+                    # 混合人體前景與自訂背景
+                    frame = (frame * combined_mask_3c + bg_resized * (1 - combined_mask_3c)).astype(np.uint8)
+                # ---------------------------------------
+
                 if pose_results and pose_results.pose_landmarks:
-                    # 頭部頂球碰撞點
-                    nose = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.NOSE]
-                    nx, ny = int(nose.x * FRAME_W), int(nose.y * FRAME_H)
-                    player_points.append((nx, ny, 38)) # 頭部較大碰撞半徑 (38px)
-                    
-                    # 繪製漂亮的頭部霓虹光圈
-                    cv2.circle(frame, (nx, ny), 35, (0, 0, 255), 3, cv2.LINE_AA)
-                    cv2.circle(frame, (nx, ny), 35, (255, 255, 255), 1, cv2.LINE_AA)
-                    draw_text(frame, "HEADER", (nx - 30, ny - 45), 0.5, (0, 255, 255), 1)
-                    
-                    # 肩膀胸膛格擋線
-                    ls = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_SHOULDER]
-                    rs = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.RIGHT_SHOULDER]
-                    lsx, lsy = int(ls.x * FRAME_W), int(ls.y * FRAME_H)
-                    rsx, rsy = int(rs.x * FRAME_W), int(rs.y * FRAME_H)
-                    
-                    # 在兩肩連線上插值出 5 個碰撞點
-                    for t in np.linspace(0, 1, 5):
-                        sx = int(lsx * t + rsx * (1 - t))
-                        sy = int(lsy * t + rsy * (1 - t))
-                        player_points.append((sx, sy, 22))
+                    for idx, pose in enumerate(pose_results.pose_landmarks):
+                        # 抓取肩膀、手腕，並新增頭部(0)、手肘(13,14)與腳踝(27,28)
+                        left_shoulder = pose[11]
+                        right_shoulder = pose[12]
+                        left_wrist = pose[15]
+                        right_wrist = pose[16]
+                        nose = pose[0]
+                        left_elbow = pose[13]
+                        right_elbow = pose[14]
+                        left_ankle = pose[27]
+                        right_ankle = pose[28]
                         
-                    # 繪製肩膀霓虹線
-                    cv2.line(frame, (lsx, lsy), (rsx, rsy), (0, 255, 0), 4, cv2.LINE_AA)
-                    cv2.line(frame, (lsx, lsy), (rsx, rsy), (255, 255, 255), 1, cv2.LINE_AA)
+                        # 映射座標
+                        lsx, lsy = int(left_shoulder.x * FRAME_W), int(left_shoulder.y * FRAME_H)
+                        rsx, rsy = int(right_shoulder.x * FRAME_W), int(right_shoulder.y * FRAME_H)
+                        lwx, lwy = int(left_wrist.x * FRAME_W), int(left_wrist.y * FRAME_H)
+                        rwx, rwy = int(right_wrist.x * FRAME_W), int(right_wrist.y * FRAME_H)
+                        nx, ny = int(nose.x * FRAME_W), int(nose.y * FRAME_H)
+                        lex, ley = int(left_elbow.x * FRAME_W), int(left_elbow.y * FRAME_H)
+                        rex, rey = int(right_elbow.x * FRAME_W), int(right_elbow.y * FRAME_H)
+                        lax, lay = int(left_ankle.x * FRAME_W), int(left_ankle.y * FRAME_H)
+                        rax, ray = int(right_ankle.x * FRAME_W), int(right_ankle.y * FRAME_H)
+                        
+                        # 計算身體中心 (以肩膀中心替代)
+                        bx, by = (lsx + rsx) // 2, (lsy + rsy) // 2
+                        
+                        # 顏色區分玩家一與玩家二
+                        body_color = (0, 255, 0) if idx == 0 else (200, 150, 0)
+                        
+                        # --- 數位傀儡 (Digital Puppetry) 繪製與碰撞映射 ---
+                        
+                        # 1. 身體 Avatar (矩形)
+                        player_points.append((bx, by, 45)) # 半徑 45 的防守範圍
+                        cv2.rectangle(frame, (bx - 40, by - 50), (bx + 40, by + 50), body_color, 2, cv2.LINE_AA)
+                        cv2.rectangle(frame, (bx - 40, by - 50), (bx + 40, by + 50), (0, 50, 0), -1)
+                        draw_text(frame, f"P{idx+1}", (bx - 15, by - 60), 0.6, body_color, 1)
+                        
+                        # 2. 左手防守手套 (紅色系)
+                        player_points.append((lwx, lwy, 35))
+                        cv2.circle(frame, (lwx, lwy), 35, (0, 0, 255), 2, cv2.LINE_AA)
+                        cv2.circle(frame, (lwx, lwy), 30, (0, 0, 150), -1)
+                        
+                        # 3. 右手防守手套 (藍色系)
+                        player_points.append((rwx, rwy, 35))
+                        cv2.circle(frame, (rwx, rwy), 35, (255, 0, 0), 2, cv2.LINE_AA)
+                        cv2.circle(frame, (rwx, rwy), 30, (150, 0, 0), -1)
+                        
+                        # 4. 頭部頂球點 (橘黃色)
+                        player_points.append((nx, ny, 35))
+                        cv2.circle(frame, (nx, ny), 35, (0, 165, 255), 2, cv2.LINE_AA)
+                        cv2.circle(frame, (nx, ny), 30, (0, 100, 200), -1)
+                        draw_text(frame, "HEAD", (nx - 20, ny - 45), 0.4, (0, 165, 255), 1)
+
+                        # 5. 手肘輔助防守點 (空心圓，填補手臂空隙)
+                        player_points.append((lex, ley, 25))
+                        cv2.circle(frame, (lex, ley), 25, (0, 0, 255), 2, cv2.LINE_AA)
+                        player_points.append((rex, rey, 25))
+                        cv2.circle(frame, (rex, rey), 25, (255, 0, 0), 2, cv2.LINE_AA)
+
+                        # 6. 雙腳踢球點 (青色系)
+                        player_points.append((lax, lay, 35))
+                        cv2.circle(frame, (lax, lay), 35, (255, 255, 0), 2, cv2.LINE_AA)
+                        cv2.circle(frame, (lax, lay), 30, (150, 150, 0), -1)
+                        player_points.append((rax, ray, 35))
+                        cv2.circle(frame, (rax, ray), 35, (255, 255, 0), 2, cv2.LINE_AA)
+                        cv2.circle(frame, (rax, ray), 30, (150, 150, 0), -1)
             else:
                 # 傳統 MOG2 背景相減法 + 霓虹邊框繪製
                 fgMask = backSub.apply(frame)
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
                 fgMask = cv2.morphologyEx(fgMask, cv2.MORPH_OPEN, kernel)
                 
+                # --- 背景替換 (MOG2 備用模式) ---
+                if background_img is not None:
+                    bg_resized = cv2.resize(background_img, (FRAME_W, FRAME_H))
+                    mask_blurred = cv2.GaussianBlur(fgMask, (5, 5), 0) / 255.0
+                    mask_3c = np.expand_dims(mask_blurred, axis=-1)
+                    frame = (frame * mask_3c + bg_resized * (1 - mask_3c)).astype(np.uint8)
+                # --------------------------------
+
                 # 尋找移動區域的輪廓
                 contours, _ = cv2.findContours(fgMask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 
@@ -748,8 +839,17 @@ def main():
 
             # 磨砂玻璃左上 HUD 面板 (Score & High Score)
             frame = draw_glass_panel(frame, 15, 15, 210, 95, (30, 20, 20), 0.5, (0, 215, 255), 1)
+            # 磨砂玻璃左上 HUD 面板 (Score, High Score & Skill)
+            frame = draw_glass_panel(frame, 15, 15, 280, 125, (30, 20, 20), 0.5, (0, 215, 255), 1)
             draw_text(frame, f"Score: {score}", (30, 48), 0.7, (255, 255, 255), 2)
             draw_text(frame, f"HI Score: {high_score}", (30, 80), 0.55, (0, 215, 255), 1)
+            
+            # 顯示技能冷卻狀態
+            if USE_MEDIAPIPE:
+                if skill_cooldown <= 0:
+                    draw_text(frame, "SKILL: READY (Cross Wrists)", (30, 110), 0.45, (0, 255, 0), 1)
+                else:
+                    draw_text(frame, f"SKILL: CD {skill_cooldown // 30}s", (30, 110), 0.45, (100, 100, 100), 1)
 
             # 顯示生命值 HUD 面板
             lives_color = (0, 0, 255) if lives == 1 and (int(time.time() * 5) % 2 == 0) else (50, 50, 255)
