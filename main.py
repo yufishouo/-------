@@ -485,7 +485,8 @@ def main():
                         rsx, rsy = int(right_shoulder.x * FRAME_W), int(right_shoulder.y * FRAME_H)
                         lwx, lwy = int(left_wrist.x * FRAME_W), int(left_wrist.y * FRAME_H)
                         rwx, rwy = int(right_wrist.x * FRAME_W), int(right_wrist.y * FRAME_H)
-                        nx, ny = int(nose.x * FRAME_W), int(nose.y * FRAME_H)
+                        # 將頭部判定點往上平移 50 像素，從鼻子移至額頭/頭頂區域
+                        nx, ny = int(nose.x * FRAME_W), int(nose.y * FRAME_H) -100
                         lex, ley = int(left_elbow.x * FRAME_W), int(left_elbow.y * FRAME_H)
                         rex, rey = int(right_elbow.x * FRAME_W), int(right_elbow.y * FRAME_H)
                         lax, lay = int(left_ankle.x * FRAME_W), int(left_ankle.y * FRAME_H)
@@ -519,7 +520,7 @@ def main():
                         player_points.append((nx, ny, 35))
                         cv2.circle(frame, (nx, ny), 35, (0, 165, 255), 2, cv2.LINE_AA)
                         cv2.circle(frame, (nx, ny), 30, (0, 100, 200), -1)
-                        draw_text(frame, "HEAD", (nx - 20, ny - 45), 0.4, (0, 165, 255), 1)
+                        draw_text(frame, "HEAD", (nx - 20, ny-45), 0.4, (0, 165, 255), 1)
 
                         # 5. 手肘輔助防守點 (空心圓，填補手臂空隙)
                         player_points.append((lex, ley, 25))
