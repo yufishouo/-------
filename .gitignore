@@ -1,0 +1,10 @@
+# Python 編譯快取檔
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 編輯器/IDE 設定
+.vscode/
+
+# 執行期動態產生的資料檔案
+highscores.json
