@@ -179,6 +179,25 @@ def generate_ice_ball():
     cv2.circle(ice, (cx, cy), radius, (255, 230, 180, 255), 2)
     return ice
 
+def generate_split_ball():
+    """生成分裂球圖像"""
+    split = np.zeros((SIZE, SIZE, 4), dtype=np.uint8)
+    cx, cy = SIZE // 2, SIZE // 2
+    cv2.circle(split, (cx-6, cy), 18, (100, 255, 100, 180), -1)
+    cv2.circle(split, (cx+6, cy), 18, (100, 255, 100, 180), -1)
+    cv2.circle(split, (cx, cy), 22, (0, 255, 0, 255), 2)
+    return split
+
+def generate_homing_ball():
+    """生成追蹤球圖像"""
+    homing = np.zeros((SIZE, SIZE, 4), dtype=np.uint8)
+    cx, cy = SIZE // 2, SIZE // 2
+    cv2.circle(homing, (cx, cy), 22, (0, 0, 255, 255), 2)
+    cv2.circle(homing, (cx, cy), 4, (0, 0, 255, 255), -1)
+    cv2.line(homing, (cx, 6), (cx, SIZE-6), (0, 0, 255, 255), 2)
+    cv2.line(homing, (6, cy), (SIZE-6, cy), (0, 0, 255, 255), 2)
+    return homing
+
 def generate_heart_ball():
     """生成愛心球圖像 (精準數學心形線 + 粉紅飽和填滿 + 白色發光外框)"""
     heart = np.zeros((SIZE, SIZE, 4), dtype=np.uint8)
@@ -211,6 +230,8 @@ cv2.imwrite('assets/ball_gold.png', generate_gold_ball())
 cv2.imwrite('assets/ball_bomb.png', generate_bomb_ball())
 cv2.imwrite('assets/ball_ice.png', generate_ice_ball())
 cv2.imwrite('assets/ball_heart.png', generate_heart_ball())
+cv2.imwrite('assets/ball_split.png', generate_split_ball())
+cv2.imwrite('assets/ball_homing.png', generate_homing_ball())
 print(">>> [圖片生成] 所有特殊球種 PNG 圖像已成功繪製至 assets/")
 
 # =====================================================================
