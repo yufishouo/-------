@@ -70,6 +70,15 @@ COLOR_DARK_PANEL = (15, 10, 25)      # 磨砂玻璃深色背景 (深幽紫黑)
 # ==========================================
 pygame.mixer.init()
 
+# --- 🎵 BGM 載入與播放 ---
+try:
+    if os.path.exists('assets/bgm.mp3'):
+        pygame.mixer.music.load('assets/bgm.mp3')
+        pygame.mixer.music.set_volume(0.4)
+        pygame.mixer.music.play(-1)
+except Exception as e:
+    print(f"Warning: Could not load BGM ({e}). Background music will be muted.")
+
 sound_files = {
     'hit': 'assets/hit.wav',
     'miss': 'assets/miss.wav',
@@ -184,7 +193,7 @@ def update_pose_tracker(num_poses):
 # 高分紀錄與進度儲存 (Save System)
 # ==========================================
 def load_save_data():
-    default_data = {'high_score': 0, 'cyber_coins': 0, 'unlocked_items': [], 'equipped_shield': 'default'}
+    default_data = {'high_score': 0, 'cyber_coins': 0, 'unlocked_items': [], 'equipped_shield': 'default', 'leaderboard': []}
     if os.path.exists(HIGH_SCORE_FILE):
         try:
             with open(HIGH_SCORE_FILE, 'r') as f:
@@ -195,6 +204,8 @@ def load_save_data():
                         default_data['high_score'] = data.get('high_score', 0)
                     else:
                         default_data.update(data)
+                        if 'leaderboard' not in default_data:
+                            default_data['leaderboard'] = []
         except Exception:
             pass
     return default_data
@@ -540,6 +551,7 @@ def main():
     cyber_coins = save_info.get('cyber_coins', 0)
     unlocked_items = save_info.get('unlocked_items', [])
     equipped_shield = save_info.get('equipped_shield', 'default')
+    leaderboard = save_info.get('leaderboard', [])
     new_record_broken = False
     bg_replace = False  # 預設為 False：顯示真實視訊背景，可手動按 'B' 鍵切換虛擬去背
 
@@ -550,6 +562,7 @@ def main():
     last_spawn_time, current_speed, current_spawn_interval, ice_timer = 0, 0, 0, 0.0
     shake_timer, flash_timer, flash_color, skill_cooldown, shield_timer, shield_cooldown, hit_stop_timer = 0, 0, (0, 0, 0), 0, 0.0, 0, 0
     fever_timer, bullet_time_timer = 0.0, 0.0
+    glitch_timer = 0
     backSub = None 
 
     print("Game Started! Press 'q' to quit.")
@@ -645,6 +658,16 @@ def main():
             
             draw_text(frame, f"ALL-TIME HIGH SCORE: {high_score}", (0, int(FRAME_H * 0.45)), 0.7, (255, 255, 255), 2, center=True)
             
+            # --- 🏆 繪製排行榜 ---
+            if leaderboard:
+                lb_panel_x1, lb_panel_y1 = FRAME_W - 280, 50
+                lb_panel_x2, lb_panel_y2 = FRAME_W - 30, 60 + len(leaderboard) * 35 + 50
+                frame = draw_glass_panel(frame, lb_panel_x1, lb_panel_y1, lb_panel_x2, lb_panel_y2, COLOR_DARK_PANEL, 0.45, COLOR_NEON_GOLD, 1)
+                draw_text(frame, "TOP 5 SCORE", (lb_panel_x1 + 45, lb_panel_y1 + 35), 0.65, COLOR_NEON_GOLD, 2)
+                for i, s in enumerate(leaderboard):
+                    rank_color = (255, 215, 0) if i == 0 else (192, 192, 192) if i == 1 else (205, 127, 50) if i == 2 else (255, 255, 255)
+                    draw_text(frame, f"#{i+1} {s}", (lb_panel_x1 + 30, lb_panel_y1 + 75 + i * 35), 0.6, rank_color, 1)
+
             draw_text(frame, "Select Game Mode:", (0, int(FRAME_H * 0.56)), 0.8, COLOR_NEON_TEAL, 2, center=True)
             draw_text(frame, "1. Single Player (Classic Arena)", (0, int(FRAME_H * 0.64)), 0.7, (255, 255, 255), 1, center=True)
             draw_text(frame, "2. Multiplayer (Wider Screen Co-op)", (0, int(FRAME_H * 0.71)), 0.7, (255, 255, 255), 1, center=True)
@@ -704,6 +727,8 @@ def main():
                 cyber_coins = save_info.get('cyber_coins', 0)
                 unlocked_items = save_info.get('unlocked_items', [])
                 equipped_shield = save_info.get('equipped_shield', 'default')
+                leaderboard = save_info.get('leaderboard', [])
+                glitch_timer = 0
                 new_record_broken = False
                 state = reset_game_state(game_difficulty, high_score)
                 score = state['score']
@@ -1290,6 +1315,7 @@ def main():
                         if sounds['hit_bomb']: sounds['hit_bomb'].play()
                         if lives <= 0:
                             game_state = STATE_GAMEOVER
+                            glitch_timer = 20
                             speak('Game Over')
                             
                     elif b_type == 'ice':
@@ -1361,6 +1387,7 @@ def main():
                             if sounds['miss']: sounds['miss'].play()
                             if lives <= 0:
                                 game_state = STATE_GAMEOVER
+                                glitch_timer = 20
                             speak('Game Over')
                         balls.remove(ball)
 
@@ -1552,56 +1579,50 @@ def main():
             draw_text(frame, f"Score: {score}", (30, 48), 0.7, (255, 255, 255), 2)
             draw_text(frame, f"HI Score: {high_score}", (30, 80), 0.55, COLOR_NEON_GOLD, 1)
             
-            # 顯示技能與重力護盾冷卻條 (RGB 霓虹動態進度條與呼吸光暈)
+            # 顯示技能冷卻圓環 (Arc Progress)
             if USE_MEDIAPIPE:
-                # 1. 大絕招 Ultimate (手腕交叉) CD 條
+                # 1. 大絕招
                 ulti_ratio = max(0.0, skill_cooldown / 300.0)
-                ulti_w = int(235 * (1.0 - ulti_ratio))
-                
                 ulti_color = COLOR_NEON_BLUE if ulti_ratio == 0 else (100, 100, 100)
-                ulti_text = "ULTI: READY (Wrist Cross)" if ulti_ratio == 0 else f"ULTI: CD {skill_cooldown // 30 + 1}s"
                 
-                draw_text(frame, ulti_text, (30, 105), 0.42, ulti_color, 1)
-                # 繪製進度條槽背景
-                draw_rounded_rect(frame, (30, 112), (265, 120), (40, 40, 40), fill=True, r=4)
-                if ulti_w > 0:
-                    draw_rounded_rect(frame, (30, 112), (30 + ulti_w, 120), ulti_color, fill=True, r=4)
-                    if ulti_ratio == 0:
-                        # 呼吸外發光效果 (Breath Glow for Ready state)
-                        pulse = int(math.sin(time.time() * 10) * 2)
-                        draw_rounded_rect(frame, (30 - pulse, 112 - pulse), (265 + pulse, 120 + pulse), COLOR_NEON_BLUE, thickness=1, r=4)
-                
-                # 2. 重力護盾 Gravity Shield (雙手高舉) CD 條
+                # 2. 護盾
                 shield_ratio = max(0.0, shield_cooldown / 450.0)
-                shield_w = int(235 * (1.0 - shield_ratio))
-                
                 shield_color = COLOR_NEON_GOLD if shield_ratio == 0 else (100, 100, 100)
-                shield_text = "SHIELD: READY (Hands Up)" if shield_ratio == 0 else f"SHIELD: CD {shield_cooldown // 30 + 1}s"
                 
-                draw_text(frame, shield_text, (30, 140), 0.42, shield_color, 1)
-                # 繪製進度條槽背景
-                draw_rounded_rect(frame, (30, 147), (265, 155), (40, 40, 40), fill=True, r=4)
-                if shield_w > 0:
-                    draw_rounded_rect(frame, (30, 147), (30 + shield_w, 155), shield_color, fill=True, r=4)
-                    if shield_ratio == 0:
-                        # 呼吸外發光效果 (Breath Glow for Ready state)
-                        pulse = int(math.sin(time.time() * 10) * 2)
-                        draw_rounded_rect(frame, (30 - pulse, 147 - pulse), (265 + pulse, 155 + pulse), COLOR_NEON_GOLD, thickness=1, r=4)
-
-                # 3. 子彈時間 Bullet Time (T-Pose) CD 條
-                bullet_ratio = max(0.0, skill_cooldown / 450.0) # 共享冷卻
-                bullet_w = int(235 * (1.0 - bullet_ratio))
-                
+                # 3. 子彈時間
+                bullet_ratio = max(0.0, skill_cooldown / 450.0)
                 bullet_color = (255, 100, 255) if bullet_ratio == 0 else (100, 100, 100)
-                bullet_text = "BULLET: READY (T-Pose)" if bullet_ratio == 0 else f"BULLET: CD {skill_cooldown // 30 + 1}s"
                 
-                draw_text(frame, bullet_text, (30, 175), 0.42, bullet_color, 1)
-                draw_rounded_rect(frame, (30, 182), (265, 190), (40, 40, 40), fill=True, r=4)
-                if bullet_w > 0:
-                    draw_rounded_rect(frame, (30, 182), (30 + bullet_w, 190), bullet_color, fill=True, r=4)
-                    if bullet_ratio == 0:
-                        pulse = int(math.sin(time.time() * 10) * 2)
-                        draw_rounded_rect(frame, (30 - pulse, 182 - pulse), (265 + pulse, 190 + pulse), (255, 100, 255), thickness=1, r=4)
+                skills = [
+                    ("ULTI", ulti_ratio, ulti_color, 65, skill_cooldown),
+                    ("SHIELD", shield_ratio, shield_color, 155, shield_cooldown),
+                    ("BULLET", bullet_ratio, bullet_color, 245, skill_cooldown)
+                ]
+                
+                draw_text(frame, "SKILL COOLDOWNS", (30, 105), 0.45, (255, 255, 255), 1)
+                
+                for name, ratio, color, cx, raw_cd in skills:
+                    cy = 155
+                    radius = 28
+                    # 繪製底圈
+                    cv2.circle(frame, (cx, cy), radius, (40, 40, 40), 5, cv2.LINE_AA)
+                    # 繪製進度弧線
+                    if ratio < 1.0:
+                        end_angle = -90 + (1.0 - ratio) * 360
+                        cv2.ellipse(frame, (cx, cy), (radius, radius), 0, -90, end_angle, color, 5, cv2.LINE_AA)
+                    if ratio == 0:
+                        pulse = int(math.sin(time.time() * 10) * 3)
+                        cv2.circle(frame, (cx, cy), radius + pulse, color, 1, cv2.LINE_AA)
+                        draw_glow_circle(frame, cx, cy, radius, color, 2, glow_factor=2)
+                    
+                    # 顯示文字
+                    text_scale = 0.4
+                    draw_text(frame, name, (cx - 18, cy + 50), text_scale, color, 1)
+                    if ratio > 0:
+                        cd_time = raw_cd // 30 + 1
+                        draw_text(frame, str(cd_time), (cx - 5, cy + 5), 0.5, (255, 255, 255), 1)
+                    else:
+                        draw_text(frame, "RDY", (cx - 15, cy + 5), 0.4, (255, 255, 255), 1)
 
             # 顯示生命值 HUD 面板 ( procedural 愛心繪製取代文字 )
             panel_w = 95 + lives * 32
@@ -1622,28 +1643,44 @@ def main():
 
             # 顯示 Combo 連擊磨砂玻璃面板 (有呼吸燈抖動特效)
             if combo >= 3:
-                pulse_scale = 0.8 + 0.12 * math.sin(time.time() * 12)
-                combo_text = f"{combo} COMBO!"
-                combo_thickness = 3
-                combo_size = cv2.getTextSize(combo_text, cv2.FONT_HERSHEY_DUPLEX, pulse_scale, combo_thickness)[0]
-                
-                cx1 = (FRAME_W - combo_size[0]) // 2 - 20
-                cx2 = (FRAME_W + combo_size[0]) // 2 + 20
-                cy1 = 80
-                cy2 = 145
+                base_scale = 0.8
+                anim_speed = 12
+                combo_color = (0, 215, 255)
                 
                 mult = 1
-                if combo >= 20: mult = 5
-                elif combo >= 10: mult = 3
-                elif combo >= 5: mult = 2
+                if combo >= 20: 
+                    mult = 5
+                    base_scale = 1.3
+                    anim_speed = 25
+                    combo_color = COLOR_NEON_MAGENTA
+                elif combo >= 10: 
+                    mult = 3
+                    base_scale = 1.0
+                    anim_speed = 18
+                    combo_color = COLOR_NEON_GOLD
+                elif combo >= 5: 
+                    mult = 2
+                
+                pulse_scale = base_scale + (0.15 * mult) * math.sin(time.time() * anim_speed)
+                shake_x = int(math.sin(time.time() * 30) * mult * 2) if combo >= 10 else 0
+                shake_y = int(math.cos(time.time() * 25) * mult * 2) if combo >= 10 else 0
+                
+                combo_text = f"{combo} COMBO!"
+                combo_thickness = 3 + (mult // 2)
+                combo_size = cv2.getTextSize(combo_text, cv2.FONT_HERSHEY_DUPLEX, pulse_scale, combo_thickness)[0]
+                
+                cx1 = (FRAME_W - combo_size[0]) // 2 - 30 + shake_x
+                cx2 = (FRAME_W + combo_size[0]) // 2 + 30 + shake_x
+                cy1 = 80 + shake_y
+                cy2 = 145 + shake_y
                 
                 if mult > 1:
-                    cy2 = 175 # 面板增高以容納乘數
+                    cy2 = 185 + shake_y # 面板增高以容納乘數
                     
-                frame = draw_glass_panel(frame, cx1, cy1, cx2, cy2, (20, 30, 20), 0.6, (0, 215, 255), 1)
-                draw_text(frame, combo_text, (cx1 + 20, 120), pulse_scale, (0, 215, 255), combo_thickness)
+                frame = draw_glass_panel(frame, cx1, cy1, cx2, cy2, (20, 30, 20), 0.6, combo_color, 2)
+                draw_text(frame, combo_text, (cx1 + 30, 120 + shake_y), pulse_scale, combo_color, combo_thickness)
                 if mult > 1:
-                    draw_text(frame, f"{mult}X SCORE MULTIPLIER", (0, 158), 0.45, (0, 255, 255), 1, center=True)
+                    draw_text(frame, f"{mult}X SCORE MULTIPLIER", (0, 168 + shake_y), 0.5, (255, 255, 255), 1, center=True)
 
             key = cv2.waitKey(30) & 0xFF
             if key == ord('q'):
@@ -1651,6 +1688,7 @@ def main():
             elif key == 27: # ESC key to surrender/exit to menu
                 lives = 0 # Force game over logic to run safely on next frame, or just change state
                 game_state = STATE_GAMEOVER
+                glitch_timer = 20
                 speak('Game Over')
             elif key == ord('b') or key == ord('B'):
                 bg_replace = not bg_replace
@@ -1661,8 +1699,14 @@ def main():
                 high_score = score
                 new_record_broken = True
             
-            # 儲存進度 (包含分數與代幣)
-            save_data({'high_score': high_score, 'cyber_coins': cyber_coins, 'unlocked_items': unlocked_items, 'equipped_shield': equipped_shield})
+            # 排行榜邏輯
+            if score > 0:
+                leaderboard.append(score)
+                leaderboard.sort(reverse=True)
+                leaderboard = leaderboard[:5] # 保持前 5 名
+            
+            # 儲存進度 (包含分數與代幣與排行榜)
+            save_data({'high_score': high_score, 'cyber_coins': cyber_coins, 'unlocked_items': unlocked_items, 'equipped_shield': equipped_shield, 'leaderboard': leaderboard})
 
             # 畫半透明黑色遮罩，使用幽邃的暗紫底色
             overlay = frame.copy()
@@ -1724,11 +1768,38 @@ def main():
         # 套用 CRT 掃描線與四角暗角特效，增強 Cyberpunk 沉浸感
         frame = (frame * VIGNETTE_MASK_3C * SCANLINES_MASK).astype(np.uint8)
 
+        # 🎬 死亡雜訊 Glitch 渲染
+        if glitch_timer > 0:
+            glitch_timer -= 1
+            # 隨機切割畫面並偏移
+            num_slices = random.randint(5, 15)
+            for _ in range(num_slices):
+                y_start = random.randint(0, FRAME_H - 10)
+                slice_h = random.randint(5, 40)
+                y_end = min(FRAME_H, y_start + slice_h)
+                x_offset = random.randint(-40, 40)
+                
+                if x_offset > 0:
+                    frame[y_start:y_end, x_offset:] = frame[y_start:y_end, :-x_offset].copy()
+                    frame[y_start:y_end, :x_offset] = 0
+                elif x_offset < 0:
+                    x_offset = abs(x_offset)
+                    frame[y_start:y_end, :-x_offset] = frame[y_start:y_end, x_offset:].copy()
+                    frame[y_start:y_end, -x_offset:] = 0
+            
+            # 隨機加上色彩濾鏡
+            color_shift = random.randint(0, 2)
+            frame[:, :, color_shift] = cv2.add(frame[:, :, color_shift], 50)
+
         # 顯示最終畫面
         cv2.imshow(WINDOW_NAME, frame)
 
     # 離開遊戲前，若有突破高分則進行安全存檔
-    save_data({'high_score': max(score, high_score), 'cyber_coins': cyber_coins, 'unlocked_items': unlocked_items, 'equipped_shield': equipped_shield})
+    if score > 0:
+        leaderboard.append(score)
+        leaderboard.sort(reverse=True)
+        leaderboard = leaderboard[:5]
+    save_data({'high_score': max(score, high_score), 'cyber_coins': cyber_coins, 'unlocked_items': unlocked_items, 'equipped_shield': equipped_shield, 'leaderboard': leaderboard})
     print(">>> [System] Data saved on exit.")
 
     cap.release()
