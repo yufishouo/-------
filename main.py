@@ -220,20 +220,25 @@ def save_data(data):
 # ==========================================
 # 3D 動態霓虹網格背景渲染 (Synthwave Grid)
 # ==========================================
+_cached_sky = None
+
 def generate_synthwave_grid(w: int, h: int, t: float):
     """
     動態 3D 霓虹網格背景渲染 (Dynamic 3D Synthwave Grid)
     利用透視投影 (Perspective Projection) 原理，即時運算產生向後方無限延伸的流動網格。
     """
-    grid = np.zeros((h, w, 3), dtype=np.uint8)
-    
-    # 畫漸層天空 (深紫藍)
-    for y in range(h // 2):
-        ratio = y / (h // 2)
-        b = int(60 * (1 - ratio) + 20)
-        g = int(10 * (1 - ratio))
-        r = int(50 * (1 - ratio))
-        cv2.line(grid, (0, y), (w, y), (b, g, r), 1)
+    global _cached_sky
+    if _cached_sky is None or _cached_sky.shape[:2] != (h, w):
+        _cached_sky = np.zeros((h, w, 3), dtype=np.uint8)
+        # 預先計算並快取漸層天空，避免每幀執行 360 次 Python for loop
+        for y in range(h // 2):
+            ratio = y / (h // 2)
+            b = int(60 * (1 - ratio) + 20)
+            g = int(10 * (1 - ratio))
+            r = int(50 * (1 - ratio))
+            cv2.line(_cached_sky, (0, y), (w, y), (b, g, r), 1)
+            
+    grid = _cached_sky.copy()
 
     horizon_y = h // 2
     # 地平線發光
@@ -278,14 +283,11 @@ def overlay_image_alpha(img, img_overlay, x, y, global_alpha=1.0):
     if oy1 >= img_overlay.shape[0] or ox1 >= img_overlay.shape[1] or y1 >= y2 or x1 >= x2:
         return img  # 移出螢幕外
 
-    alpha_s = (img_overlay[oy1:oy2, ox1:ox2, 3] / 255.0) * global_alpha
+    # 向量化 Alpha Blending (避免 Python for loop 逐通道計算，提升合成速度)
+    alpha_s = (img_overlay[oy1:oy2, ox1:ox2, 3:4] / 255.0) * global_alpha
     alpha_l = 1.0 - alpha_s
 
-    for c in range(0, 3):
-        img[y1:y2, x1:x2, c] = (
-            alpha_s * img_overlay[oy1:oy2, ox1:ox2, c] +
-            alpha_l * img[y1:y2, x1:x2, c]
-        )
+    img[y1:y2, x1:x2] = (alpha_s * img_overlay[oy1:oy2, ox1:ox2, :3] + alpha_l * img[y1:y2, x1:x2]).astype(np.uint8)
     return img
 
 # ==========================================
@@ -337,14 +339,24 @@ def draw_rounded_rect(img, pt1, pt2, color, thickness=1, r=12, fill=False):
     return img
 
 def draw_glow_circle(img, cx, cy, r, color, thickness=2, glow_factor=3):
-    """在圓形周圍繪製多層半透明的發光光環效果 (Neon Glow)"""
+    """在圓形周圍繪製多層半透明的發光光環效果 (Neon Glow)，優化：僅處理 ROI 避免全螢幕記憶體拷貝"""
+    h, w = img.shape[:2]
+    max_r = r + glow_factor * 4 + thickness + glow_factor * 2
+    x1, x2 = max(0, cx - max_r), min(w, cx + max_r)
+    y1, y2 = max(0, cy - max_r), min(h, cy + max_r)
+    
+    if x1 >= x2 or y1 >= y2:
+        return
+        
+    roi = img[y1:y2, x1:x2]
     for i in range(glow_factor, 0, -1):
         alpha = 0.12 * (1.0 - (i / (glow_factor + 1)))
         glow_r = r + i * 4
-        overlay = img.copy()
-        cv2.circle(overlay, (cx, cy), glow_r, color, thickness + i * 2, cv2.LINE_AA)
-        cv2.addWeighted(overlay, alpha, img, 1.0 - alpha, 0, img)
-    cv2.circle(img, (cx, cy), r, color, thickness, cv2.LINE_AA)
+        overlay_roi = roi.copy()
+        cv2.circle(overlay_roi, (cx - x1, cy - y1), glow_r, color, thickness + i * 2, cv2.LINE_AA)
+        cv2.addWeighted(overlay_roi, alpha, roi, 1.0 - alpha, 0, roi)
+        
+    cv2.circle(roi, (cx - x1, cy - y1), r, color, thickness, cv2.LINE_AA)
 
 def draw_heart(img, cx, cy, size, color):
     """在給定座標繪製精美的向量愛心 (抗鋸齒填滿，用於生命值顯示)"""
@@ -398,22 +410,26 @@ def draw_glass_panel(img, x1, y1, x2, y2, bg_color=(0, 0, 0), alpha=0.4, border_
     
     # 4. 繪製精緻的霓虹圓角雙邊框與外發光效果
     if border_thickness > 0:
-        # A. 外發光投影效果 (Neon Outer Glow)
-        glow_overlay = img.copy()
-        for i in range(4, 0, -1):
-            # 基於圓角矩形繪製逐漸淡出的外框
-            draw_rounded_rect(glow_overlay, (x1 - i, y1 - i), (x2 + i, y2 + i), border_color, thickness=border_thickness + i * 2, r=corner_radius + i)
-        cv2.addWeighted(glow_overlay, 0.12, img, 0.88, 0, img)
+        pad = 12
+        bx1, bx2 = max(0, x1 - pad), min(w, x2 + pad)
+        by1, by2 = max(0, y1 - pad), min(h, y2 + pad)
         
-        # B. 核心主要發光邊框 (Core Neon Border)
-        draw_rounded_rect(img, (x1, y1), (x2, y2), border_color, thickness=border_thickness, r=corner_radius)
-        
-        # C. 內層超細緻白色高光玻璃反光邊框 (Inset White Specular Border)
-        # 用於營造真實玻璃切割反光感，使面板顯得極其高端
-        specular_color = (255, 255, 255)
-        specular_overlay = img.copy()
-        draw_rounded_rect(specular_overlay, (x1 + 1, y1 + 1), (x2 - 1, y2 - 1), specular_color, thickness=1, r=max(0, corner_radius - 1))
-        cv2.addWeighted(specular_overlay, 0.35, img, 0.65, 0, img)
+        if bx1 < bx2 and by1 < by2:
+            roi_img = img[by1:by2, bx1:bx2]
+            
+            # A. 外發光投影效果 (Neon Outer Glow)，優化：僅處理 ROI 避免全螢幕拷貝
+            glow_overlay = roi_img.copy()
+            for i in range(4, 0, -1):
+                draw_rounded_rect(glow_overlay, (x1 - bx1 - i, y1 - by1 - i), (x2 - bx1 + i, y2 - by1 + i), border_color, thickness=border_thickness + i * 2, r=corner_radius + i)
+            cv2.addWeighted(glow_overlay, 0.12, roi_img, 0.88, 0, roi_img)
+            
+            # B. 核心主要發光邊框 (Core Neon Border)
+            draw_rounded_rect(roi_img, (x1 - bx1, y1 - by1), (x2 - bx1, y2 - by1), border_color, thickness=border_thickness, r=corner_radius)
+            
+            # C. 內層超細緻白色高光玻璃反光邊框 (Inset White Specular Border)
+            specular_overlay = roi_img.copy()
+            draw_rounded_rect(specular_overlay, (x1 - bx1 + 1, y1 - by1 + 1), (x2 - bx1 - 1, y2 - by1 - 1), (255, 255, 255), thickness=1, r=max(0, corner_radius - 1))
+            cv2.addWeighted(specular_overlay, 0.35, roi_img, 0.65, 0, roi_img)
         
     return img
 
@@ -553,8 +569,25 @@ def main():
     equipped_shield = save_info.get('equipped_shield', 'default')
     leaderboard = save_info.get('leaderboard', [])
     new_record_broken = False
+    score_saved = False
     bg_replace = False  # 預設為 False：顯示真實視訊背景，可手動按 'B' 鍵切換虛擬去背
 
+    # 預先計算全螢幕特效遮罩，避免每幀重複計算浪費大量 CPU 資源
+    FRAME_H, FRAME_W = 720, 1280
+    _x = np.arange(FRAME_W) - FRAME_W / 2
+    _y = np.arange(FRAME_H) - FRAME_H / 2
+    _X, _Y = np.meshgrid(_x, _y)
+    _dist = np.hypot(_X, _Y)
+    _max_dist = np.hypot(FRAME_W / 2, FRAME_H / 2)
+    VIGNETTE_MASK = 1.0 - 0.45 * (_dist / _max_dist) ** 2.2
+    VIGNETTE_MASK_3C = np.stack((VIGNETTE_MASK,) * 3, axis=-1).astype(np.float32)
+
+    SCANLINES_MASK = np.ones((FRAME_H, FRAME_W, 3), dtype=np.float32)
+    SCANLINES_MASK[::3, :, :] = 0.88
+    SCANLINES_MASK[1::3, :, :] = 0.95
+    
+    # 預先合併這兩層遮罩，將每幀的乘法次數減半
+    FINAL_OVERLAY_MASK = (VIGNETTE_MASK_3C * SCANLINES_MASK).astype(np.float32)
 
     # 初始化這些變數，稍後 reset 時會覆蓋
     score, lives, balls, effects, particles, combo, ambient_sparks, shockwaves = 0, MAX_LIVES, [], [], [], 0, [], []
@@ -591,19 +624,6 @@ def main():
         frame = cv2.resize(frame, (1280, 720), interpolation=cv2.INTER_LINEAR)
         FRAME_H, FRAME_W = 720, 1280
         
-        # 產生暗角 (Vignette) 與掃描線 (Scanlines) 的 Mask
-        _x = np.arange(FRAME_W) - FRAME_W / 2
-        _y = np.arange(FRAME_H) - FRAME_H / 2
-        _X, _Y = np.meshgrid(_x, _y)
-        _dist = np.hypot(_X, _Y)
-        _max_dist = np.hypot(FRAME_W / 2, FRAME_H / 2)
-        VIGNETTE_MASK = 1.0 - 0.45 * (_dist / _max_dist) ** 2.2
-        VIGNETTE_MASK_3C = np.stack((VIGNETTE_MASK,) * 3, axis=-1).astype(np.float32)
-
-        SCANLINES_MASK = np.ones((FRAME_H, FRAME_W, 3), dtype=np.float32)
-        SCANLINES_MASK[::3, :, :] = 0.88
-        SCANLINES_MASK[1::3, :, :] = 0.95
-
         # 震屏特效實作 (Screen Shake translation matrix)
         if game_state == STATE_PLAYING and shake_timer > 0:
             dx = random.randint(-8, 8)
@@ -730,6 +750,7 @@ def main():
                 leaderboard = save_info.get('leaderboard', [])
                 glitch_timer = 0
                 new_record_broken = False
+                score_saved = False
                 state = reset_game_state(game_difficulty, high_score)
                 score = state['score']
                 lives = state['lives']
@@ -787,18 +808,18 @@ def main():
                 game_state = STATE_MENU_MODE
             elif key == ord('0'):
                 equipped_shield = 'default'
-                save_data({'high_score': high_score, 'cyber_coins': cyber_coins, 'unlocked_items': unlocked_items, 'equipped_shield': equipped_shield})
+                save_data({'high_score': high_score, 'cyber_coins': cyber_coins, 'unlocked_items': unlocked_items, 'equipped_shield': equipped_shield, 'leaderboard': leaderboard})
             elif key == ord('1') or key == ord('2'):
                 idx = int(chr(key)) - 1
                 item = items[idx]
                 if item['id'] in unlocked_items:
                     equipped_shield = item['id']
-                    save_data({'high_score': high_score, 'cyber_coins': cyber_coins, 'unlocked_items': unlocked_items, 'equipped_shield': equipped_shield})
+                    save_data({'high_score': high_score, 'cyber_coins': cyber_coins, 'unlocked_items': unlocked_items, 'equipped_shield': equipped_shield, 'leaderboard': leaderboard})
                 elif cyber_coins >= item['cost']:
                     cyber_coins -= item['cost']
                     unlocked_items.append(item['id'])
                     equipped_shield = item['id']
-                    save_data({'high_score': high_score, 'cyber_coins': cyber_coins, 'unlocked_items': unlocked_items, 'equipped_shield': equipped_shield})
+                    save_data({'high_score': high_score, 'cyber_coins': cyber_coins, 'unlocked_items': unlocked_items, 'equipped_shield': equipped_shield, 'leaderboard': leaderboard})
 
         elif game_state == STATE_PLAYING:
             if equipped_shield == 'quantum_purple':
@@ -1074,6 +1095,8 @@ def main():
                 last_spawn_time += (1.0 / 30.0) # 補償暫停的時間避免生成錯亂
                 if ice_timer > 0: ice_timer += (1.0 / 30.0)
                 if shield_timer > 0: shield_timer += (1.0 / 30.0)
+                if bullet_time_timer > 0: bullet_time_timer += (1.0 / 30.0)
+                if fever_timer > 0: fever_timer += (1.0 / 30.0)
 
             # Boss 觸發邏輯
             if score >= next_boss_score and not boss['active'] and not boss['dead']:
@@ -1092,14 +1115,12 @@ def main():
                 effects.append({'text': 'WARNING: BOSS APPROACHING!', 'x': FRAME_W//2 - 200, 'y': FRAME_H//2, 'color': (0, 0, 255), 'life': 90, 'vx': 0, 'vy': -1.0})
 
             # 檢查並觸發 Fever Mode
-            if combo >= 20 and fever_timer <= 0:
+            is_fever_active = fever_timer > 0 and time.time() < fever_timer
+            if combo >= 20 and not is_fever_active:
                 fever_timer = time.time() + 8.0
+                is_fever_active = True
                 effects.append({'text': 'FEVER MODE!', 'x': FRAME_W//2 - 150, 'y': FRAME_H//2, 'color': (0, 215, 255), 'life': 90, 'vx': 0, 'vy': -1.0})
                 if sounds['hit_gold']: sounds['hit_gold'].play()
-            
-            is_fever_active = fever_timer > 0 and time.time() < fever_timer
-            if is_fever_active:
-                fever_timer -= (1.0 / 30.0) if not update_physics else 0
 
             # 3. 遊戲邏輯 - 虛擬球隨機生成
             current_time = time.time()
@@ -1199,9 +1220,23 @@ def main():
                 if len(ball['trail']) > 8:
                     ball['trail'].pop(0)
                     
+                if ball.get('has_gravity', False):
+                    ball['dy'] += 0.3 * speed_mult
+                    if ball['x'] < 0:
+                        ball['x'] = 0
+                        ball['dx'] *= -1
+                    elif ball['x'] > FRAME_W - BALL_WIDTH:
+                        ball['x'] = FRAME_W - BALL_WIDTH
+                        ball['dx'] *= -1
+
                 # 更新位置
                 ball['x'] += ball['dx'] * speed_mult
                 ball['y'] += ball['dy'] * speed_mult
+
+                # 全局越界清除 (避免球體無限飄移 Memory Leak)
+                if ball['x'] < -300 or ball['x'] > FRAME_W + 300 or ball['y'] < -500 or ball['y'] > FRAME_H + 300:
+                    balls.remove(ball)
+                    continue
                 
                 if ball.get('deflected', False) and boss['active']:
                     dist = np.hypot(ball['x'] - boss['x'], ball['y'] - boss['y'])
@@ -1350,8 +1385,8 @@ def main():
                         effects.append({'text': 'SPLIT!', 'x': bx, 'y': by, 'color': (50, 255, 50), 'life': 30, 'vx': 0, 'vy': -2.0})
                         hit_stop_timer = 2
                         if sounds['hit']: sounds['hit'].play()
-                        balls.append({'x': bx, 'y': by, 'dx': -6, 'dy': -3, 'type': 'normal', 'trail': []})
-                        balls.append({'x': bx, 'y': by, 'dx': 6, 'dy': -3, 'type': 'normal', 'trail': []})
+                        balls.append({'x': bx, 'y': by, 'dx': -8, 'dy': -8, 'type': 'normal', 'trail': [], 'has_gravity': True})
+                        balls.append({'x': bx, 'y': by, 'dx': 8, 'dy': -8, 'type': 'normal', 'trail': [], 'has_gravity': True})
 
                     elif b_type == 'homing':
                         pts_earned = 15 * mult
@@ -1388,7 +1423,7 @@ def main():
                             if lives <= 0:
                                 game_state = STATE_GAMEOVER
                                 glitch_timer = 20
-                            speak('Game Over')
+                                speak('Game Over')
                         balls.remove(ball)
 
             # 5. 畫面渲染
@@ -1526,21 +1561,28 @@ def main():
                 vx = effect.get('vx', 0)
                 vy = effect.get('vy', -2.0)
                 
+                if 'max_life' not in effect:
+                    effect['max_life'] = effect['life']
+                
                 if update_physics:
                     effect['x'] += vx
                     effect['y'] += vy
                     effect['vy'] = min(0.5, effect['vy'] + 0.1)  # 模擬空氣阻力，減速向上漂浮
                     effect['life'] -= 1
                 
-                # 使用 life 計算縮放以實現「Pop (彈出)」效果
-                scale = 0.8
-                max_life = effect.get('max_life', effect['life'] + 10)
-                if 'max_life' not in effect:
-                    effect['max_life'] = max_life
+                # 使用 life 計算縮放以實現「Pop (彈出)」效果 (真實彈跳與淡出曲線)
+                scale = 1.0
+                max_life = effect['max_life']
                 
                 life_ratio = effect['life'] / max_life if max_life > 0 else 0
                 if life_ratio > 0.8:
-                    scale = 0.8 + (1.0 - life_ratio) * 1.5  # 剛出現時會放大
+                    # 剛出現時從 1.5 快速縮小回 1.0 (真實 Pop)
+                    pop_factor = (life_ratio - 0.8) * 5.0 # 0.0 到 1.0
+                    scale = 1.0 + pop_factor * 0.5 
+                
+                # 消失前淡出縮小
+                if life_ratio < 0.2:
+                    scale = max(0.1, life_ratio * 5.0)
                 
                 draw_text(frame, effect['text'], (int(effect['x']), int(effect['y'])), scale, effect['color'], 2)
                 if effect['life'] <= 0:
@@ -1577,7 +1619,9 @@ def main():
             panel_y2 = 220 if USE_MEDIAPIPE else 125
             frame = draw_glass_panel(frame, 15, 15, 295, panel_y2, COLOR_DARK_PANEL, 0.55, COLOR_NEON_TEAL, 1)
             draw_text(frame, f"Score: {score}", (30, 48), 0.7, (255, 255, 255), 2)
-            draw_text(frame, f"HI Score: {high_score}", (30, 80), 0.55, COLOR_NEON_GOLD, 1)
+            # 即時更新突破紀錄的視覺反饋
+            display_high_score = int(max(score, high_score))
+            draw_text(frame, f"HI Score: {display_high_score}", (30, 80), 0.55, COLOR_NEON_GOLD, 1)
             
             # 顯示技能冷卻圓環 (Arc Progress)
             if USE_MEDIAPIPE:
@@ -1695,18 +1739,20 @@ def main():
 
         elif game_state == STATE_GAMEOVER:
             # 判斷是否打破歷史高分紀錄並儲存
-            if score > high_score:
-                high_score = score
-                new_record_broken = True
-            
-            # 排行榜邏輯
-            if score > 0:
-                leaderboard.append(score)
-                leaderboard.sort(reverse=True)
-                leaderboard = leaderboard[:5] # 保持前 5 名
-            
-            # 儲存進度 (包含分數與代幣與排行榜)
-            save_data({'high_score': high_score, 'cyber_coins': cyber_coins, 'unlocked_items': unlocked_items, 'equipped_shield': equipped_shield, 'leaderboard': leaderboard})
+            if not score_saved:
+                if score > high_score:
+                    high_score = score
+                    new_record_broken = True
+                
+                # 排行榜邏輯
+                if score > 0:
+                    leaderboard.append(score)
+                    leaderboard.sort(reverse=True)
+                    leaderboard = leaderboard[:5] # 保持前 5 名
+                
+                # 儲存進度 (包含分數與代幣與排行榜)
+                save_data({'high_score': high_score, 'cyber_coins': cyber_coins, 'unlocked_items': unlocked_items, 'equipped_shield': equipped_shield, 'leaderboard': leaderboard})
+                score_saved = True
 
             # 畫半透明黑色遮罩，使用幽邃的暗紫底色
             overlay = frame.copy()
@@ -1765,8 +1811,8 @@ def main():
         # ------------------------------------------
         # 最終畫面後製 (Post-Processing)
         # ------------------------------------------
-        # 套用 CRT 掃描線與四角暗角特效，增強 Cyberpunk 沉浸感
-        frame = (frame * VIGNETTE_MASK_3C * SCANLINES_MASK).astype(np.uint8)
+        # 套用 CRT 掃描線與四角暗角特效，增強 Cyberpunk 沉浸感 (使用預先計算的 Mask 與 OpenCV 加速)
+        frame = cv2.multiply(frame.astype(np.float32), FINAL_OVERLAY_MASK).astype(np.uint8)
 
         # 🎬 死亡雜訊 Glitch 渲染
         if glitch_timer > 0:
@@ -1795,7 +1841,7 @@ def main():
         cv2.imshow(WINDOW_NAME, frame)
 
     # 離開遊戲前，若有突破高分則進行安全存檔
-    if score > 0:
+    if score > 0 and not score_saved:
         leaderboard.append(score)
         leaderboard.sort(reverse=True)
         leaderboard = leaderboard[:5]
